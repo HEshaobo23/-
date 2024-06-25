@@ -1,0 +1,187 @@
+
+    public String punchCard(String account, String password, String address, String email, Long cardId) throws IOException {
+        String phonetype;
+        SysDictData sysDictData = new SysDictData();
+        //邮箱模板
+        String content = querySysNotice(1583331618593955841L);
+        sysDictData.setDictType("sys_phone_types");
+//            item.setStartTime(DateUtil.parse(String.valueOf(item.getStartTime()),"yyyy-MM-dd"));
+//            item.setEndTime(DateUtil.parse(String.valueOf(item.getEndTime()),"yyyy-MM-dd"));
+        List<SysDictData> dataList = SysDictDatas(sysDictData);
+        int count = RandomUtil.randomInt(0, dataList.size() - 1);
+        phonetype = dataList.get(count).getDictValue();
+        String uid = RedisUtils.getCacheObject(userKey + account + ":uid");
+        //登录和打卡用同一个代理ip
+        String url = sysConfigService.selectConfigByKey("sys:ip.master");
+        String open = sysConfigService.selectConfigByKey("sys:ip:open");
+        String cache = sysConfigService.selectConfigByKey("sys:ip:cache");
+        String openZxjy = sysConfigService.selectConfigByKey("sys:ip:open_zxjy");
+        HttpProxy httpProxy = new HttpProxy(url, open, cache, "yes".equals(openZxjy));
+        String token = null;
+        LoginVO login = login(account, password, null);
+        uid = login.getData().getUid();
+        token = login.getData().getUserToken();
+
+        PunchCardVo punchCardVo = punchCardMapper.selectVoOne(new QueryWrapper<PunchCard>().eq("dk_phone", account).eq("is_del", 1));
+        JSONObject data = new JSONObject();
+
+        //坐标偏移
+        long currentTimeMillis = System.currentTimeMillis();
+        CloseableHttpClient httpClient = HttpClientBuilder.create().build();
+        Random rand = new Random();
+        data.set("phonetype", phonetype)
+                .set("address", punchCardVo.getDkAddress())
+                .set("dtype", 1)
+                .set("probability", 0)
+                .set("longitude", punchCardVo.getLongitude().substring(0, punchCardVo.getLongitude().length() - 1) + rand.nextInt(9) + 1)
+                .set("latitude", punchCardVo.getLatitude().substring(0, punchCardVo.getLatitude().length() - 1) + rand.nextInt(9) + 1)
+                .set("uid", uid);
+
+        String jsonStr = JSONUtil.toJsonStr(data);
+
+        // String sign1 = hmacSha256(jsonStr1 + token,"Anything_2023");
+        String sign = hmacSha256(jsonStr + token, "Anything_2023");
+        LoginVO loginVO = new LoginVO();
+        String body = "";
+        CloseableHttpResponse response = null;
+
+        CloseableHttpClient httpClient1 = HttpClientBuilder.create().build();
+        HttpPost httpGet1 = new HttpPost(ApiConfig.PUNCHCARD1_API);
+        httpGet1.setHeader("content-type", "application/json");
+        httpGet1.setHeader("Sign", sign);
+        httpGet1.setHeader("appVersion", "57");
+        httpGet1.setHeader("os", "android");
+        httpGet1.setHeader("cl_ip", httpProxy.getIp());
+        httpGet1.setHeader("User-Agent", "okhttp/3.14.9");
+        httpGet1.setHeader("timestamp", String.valueOf(currentTimeMillis));
+        httpGet1.setHeader("phone", phonetype);
+        httpGet1.setHeader("token", token);
+        CloseableHttpResponse response1 = null;
+        StringEntity entity1 = new StringEntity(jsonStr, Consts.UTF_8);
+        httpGet1.setEntity(entity1);
+        String result1 = null;
+        try {
+            //备用代理
+            if (StringUtils.isNotEmpty(httpProxy.getHeader()) && httpProxy.isOpen()) {
+                httpGet1.setHeader("Proxy-Authorization", httpProxy.getHeader());
+                //request1.header("Proxy-Authorization", httpProxy.getHeader());
+            }
+            response = httpClient.execute(httpGet1);
+            HttpEntity entity2 = response.getEntity();
+            result1 = EntityUtils.toString(entity2);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        loginVO = JSONUtil.toBean(result1, LoginVO.class);
+
+        try {
+
+
+            //超时，毫秒
+            //获取个人档案
+            if (userSchoolServiceLmpl.queryByPhone(account) == null) {
+                JSONObject data1 = new JSONObject();
+                data1
+                        .set("uid", uid)
+                        .set("dtype", 2)
+                ;
+                String jsonStr1 = JSONUtil.toJsonStr(data1);
+                String sign1 = hmacSha256(jsonStr1 + token, "Anything_2023");
+                MediaType mediaType = MediaType.parse("application/json");
+                OkHttpClient client = new OkHttpClient.Builder()
+                        .connectTimeout(5, TimeUnit.SECONDS) // 设置连接超时时间为10秒
+                        .readTimeout(5, TimeUnit.SECONDS) // 设置读取超时时间为30秒
+                        .build();
+                ObjectMapper objectMapper = new ObjectMapper();
+                String json = objectMapper.writeValueAsString(data1);
+                RequestBody formBody = RequestBody.create(mediaType, json);
+                Request.Builder request3 = new Request.Builder()
+                        .url("https://sxbaapp.zcj.jyt.henan.gov.cn/api/relog.ashx")
+                        .post(formBody);
+                request3.header("content-type", "application/json");
+                request3.header("Sign", sign1);
+                request3.header("appVersion", "57");
+                request3.header("os", "android");
+                request3.header("cl_ip", httpProxy.getIp());
+                request3.header("User-Agent", "okhttp/3.14.9");
+                request3.header("timestamp", String.valueOf(currentTimeMillis));
+                request3.header("phone", phonetype);
+                request3.header("token", token);
+                Request request = request3.build();
+                try (Response response2 = client.newCall(request).execute()) {
+                    String responseData = response2.body().string();
+                    test01.toJson(responseData, account, password, String.valueOf(punchCardVo.getUserId()));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+
+
+            }
+
+
+        } catch (Exception e) {
+            if (e.getMessage().contains("Connection reset")) {
+                RedisUtils.deleteKeys("cache:ip:master");
+            }
+        }
+        if (loginVO.getCode() == null) {
+            throw new RuntimeException("打卡代理返回，发生错误{" + body + "}，" + "错误信息" + loginVO.getMsg() + "登录信息" + uid);
+
+        }
+        //网络波动可能打卡已经完成了
+        if (loginVO.getMsg().contains("今日已打卡") || body.contains("今日已打卡")) {
+            //更新表信息
+            PunchCard punchCard = new PunchCard();
+            punchCard.setId(punchCardVo.getId());
+            punchCard.setRecord(1);
+            punchCard.setUpdateTime(new Date());
+            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+            Date date = new Date();
+            String format = dateFormat.format(date);
+
+            punchCard.setLogs(loginVO.getMsg() + " 时间：" + format);
+            punchCardMapper.updateById(punchCard);
+            throw new RuntimeException("今日已打卡");
+        }
+        if (1001 == loginVO.getCode()) {
+            CardRecordBo bo = new CardRecordBo();
+            bo.setLog(loginVO.toString());
+            bo.setTime(DateUtil.now());
+            bo.setCardId(cardId);
+            cardRecordService.insertByBo(bo);
+            log.info("打卡成功");
+            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+            Date date = new Date();
+            String format = dateFormat.format(date);
+
+            PunchCard punchCard = new PunchCard();
+            punchCard.setLogs(loginVO.getMsg() + " 时间：" + format);
+            punchCard.setId(punchCardVo.getId());
+            punchCardMapper.updateById(punchCard);
+            return loginVO.getMsg();
+        }
+        if (1002 == loginVO.getCode()) {
+            log.info("打卡失败，账号密码");
+            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+            Date date = new Date();
+            String format = dateFormat.format(date);
+
+            PunchCard punchCard = new PunchCard();
+            punchCard.setLogs(loginVO.getMsg() + " 时间：" + format);
+            punchCard.setId(punchCardVo.getId());
+            punchCardMapper.updateById(punchCard);
+            return loginVO.getMsg();
+        }
+        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+        Date date = new Date();
+        String format = dateFormat.format(date);
+
+        PunchCard punchCard = new PunchCard();
+        punchCard.setLogs(loginVO.getMsg() + " 时间：" + format);
+        punchCard.setId(punchCardVo.getId());
+        punchCardMapper.updateById(punchCard);
+        log.error(loginVO.getMsg());
+        sendEmail(email, content.replace("$msg", loginVO.getMsg() + "错误账号是：【" + account + "】 错误位置：【解析打卡请求发生错误】"));
+        throw new RuntimeException(loginVO.getMsg());
+    }
