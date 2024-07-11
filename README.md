@@ -32,6 +32,8 @@
 ### 职校家园打卡管理界面 
 ![1720718993475](https://github.com/HEshaobo23/-/assets/135514643/9ccf5447-37c3-4f92-8a36-cfd07b665d8f)
 
+![Uploading image.png…]()
+
 
 
 ## 其他业务
